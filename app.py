@@ -9,6 +9,11 @@ from datetime import datetime
 import joblib
 from tensorflow.keras.preprocessing import image
 import os
+import logging
+
+# Configurar logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="E-commerce ML Models API")
 
@@ -27,21 +32,27 @@ class SalesPredictionInput(BaseModel):
 class ModelLoader:
     def __init__(self):
         try:
+            logger.info("Starting to load models and data...")
+            
             # Load recommender system and its data
+            logger.info("Loading recommender system...")
             with open('models/recommender/recommender.pkl', 'rb') as f:
                 self.recommender = pickle.load(f)
             self.products_df = pd.read_pickle('models/recommender/products_df.pkl')
             self.interactions_df = pd.read_pickle('models/recommender/interactions_df.pkl')
             
             # Load image classifier
+            logger.info("Loading image classifier...")
             self.classifier = tf.keras.models.load_model('models/classifier/ecommerce_classifier.h5')
             self.class_names = ['jeans', 'sofa', 'tshirt', 'tv']
             
             # Load sales prediction model and data
+            logger.info("Loading sales prediction model...")
             self.sales_model = tf.keras.models.load_model('models/sales/sales_prediction_model.h5')
             self.scaler = joblib.load('models/sales/scaler.pkl')
             
             # Load sales data
+            logger.info("Loading sales data...")
             self.train_data = pd.read_csv('data/train.csv')
             self.stores_data = pd.read_csv('data/stores.csv')
             self.features_data = pd.read_csv('data/features.csv')
@@ -50,13 +61,19 @@ class ModelLoader:
             self.train_data['Date'] = pd.to_datetime(self.train_data['Date'])
             self.features_data['Date'] = pd.to_datetime(self.features_data['Date'])
             
-            print("All models and data loaded successfully")
+            logger.info("All models and data loaded successfully")
         except Exception as e:
-            print(f"Error loading models and data: {str(e)}")
+            logger.error(f"Error loading models and data: {str(e)}")
             raise
 
 # Initialize models
-models = ModelLoader()
+try:
+    logger.info("Initializing models...")
+    models = ModelLoader()
+    logger.info("Models initialized successfully")
+except Exception as e:
+    logger.error(f"Failed to initialize models: {str(e)}")
+    raise
 
 def prepare_sequence_for_prediction(store, dept, date, train_data, stores_data, features_data):
     """
@@ -186,26 +203,30 @@ def get_recommendations(input_data: RecommenderInput):
     Endpoint para obtener recomendaciones de productos.
     """
     try:
+        logger.info(f"Processing recommendation request: {input_data}")
+        
         if input_data.user_id is not None:
+            logger.info(f"Getting recommendations for user {input_data.user_id}")
             recommendations = models.recommender.get_recommendations(
                 input_data.user_id,
                 n_recommendations=input_data.n_recommendations
             )
         elif input_data.product_history is not None:
+            logger.info(f"Getting recommendations from product history: {input_data.product_history}")
             recommendations = models.recommender.get_recommendations_from_history(
                 input_data.product_history,
                 n_recommendations=input_data.n_recommendations
             )
         else:
+            logger.info("Getting popular recommendations")
             recommendations = models.recommender._get_popular_recommendations(
                 n_recommendations=input_data.n_recommendations
             )
 
         return {"recommendations": recommendations}
     except Exception as e:
+        logger.error(f"Error getting recommendations: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        models.recommender.cleanup()
 
 @app.post("/classify-image")
 async def classify_image(file: UploadFile = File(...)):
@@ -213,6 +234,8 @@ async def classify_image(file: UploadFile = File(...)):
     Endpoint para clasificar imágenes de productos.
     """
     try:
+        logger.info(f"Processing image classification request for file: {file.filename}")
+        
         # Save uploaded file temporarily
         temp_path = f"temp_{file.filename}"
         with open(temp_path, "wb") as buffer:
@@ -233,11 +256,13 @@ async def classify_image(file: UploadFile = File(...)):
         # Clean up
         os.remove(temp_path)
 
+        logger.info(f"Image classified as {predicted_class} with confidence {confidence}")
         return {
             "predicted_class": predicted_class,
             "confidence": confidence
         }
     except Exception as e:
+        logger.error(f"Error classifying image: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/predict-sales")
@@ -246,6 +271,8 @@ def predict_sales(input_data: SalesPredictionInput):
     Endpoint para predecir ventas.
     """
     try:
+        logger.info(f"Processing sales prediction request: {input_data}")
+        
         # Validate store
         if input_data.store not in models.stores_data['Store'].values:
             raise HTTPException(status_code=400, detail=f"Invalid store: {input_data.store}")
@@ -305,6 +332,7 @@ def predict_sales(input_data: SalesPredictionInput):
         upper_bound = patterns['recent_trend'] + 1.5 * patterns['recent_std']
         final_prediction = float(np.clip(final_prediction, lower_bound, upper_bound))
 
+        logger.info(f"Sales prediction complete. Final prediction: {final_prediction}")
         return {
             "base_prediction": base_prediction,
             "adjusted_prediction": adjusted_prediction,
@@ -318,6 +346,7 @@ def predict_sales(input_data: SalesPredictionInput):
     except HTTPException:
         raise
     except Exception as e:
+        logger.error(f"Error predicting sales: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/valid-data")
@@ -326,6 +355,7 @@ def get_valid_prediction_data():
     Endpoint para obtener datos válidos para predicciones.
     """
     try:
+        logger.info("Retrieving valid prediction data")
         valid_stores = models.stores_data['Store'].unique().tolist()
         valid_depts = models.train_data['Dept'].unique().tolist()
         date_range = {
@@ -333,10 +363,15 @@ def get_valid_prediction_data():
             'max_date': models.features_data['Date'].max().strftime('%Y-%m-%d')
         }
         
+        logger.info("Valid prediction data retrieved successfully")
         return {
             "valid_stores": valid_stores,
             "valid_departments": valid_depts,
-            "date_range": date_range
+            "date_range": date_range,
+            "store_types": models.stores_data['Type'].unique().tolist(),
+            "total_stores": len(valid_stores),
+            "total_departments": len(valid_depts)
         }
     except Exception as e:
+        logger.error(f"Error retrieving valid prediction data: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
