@@ -12,6 +12,15 @@ import os
 import logging
 from recommender import ImprovedRecommender
 
+
+class CustomUnpickler(pickle.Unpickler):
+    def find_class(self, module, name):
+        # Si el pickle busca __main__.ImprovedRecommender, redirige a recommender.ImprovedRecommender
+        if module == "__main__" and name == "ImprovedRecommender":
+            module = "recommender"
+        return super().find_class(module, name)
+
+
 # Configurar logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -37,8 +46,9 @@ class ModelLoader:
             
             # Load recommender system and its data
             logger.info("Loading recommender system...")
-            with open('models/recommender/recommender.pkl', 'rb') as f:
-                self.recommender = pickle.load(f)
+            # Al cargar el pickle, usa el CustomUnpickler
+            with open('models/recommender.pkl', 'rb') as f:
+                    recommender_model = CustomUnpickler(f).load()
             self.products_df = pd.read_pickle('models/recommender/products_df.pkl')
             self.interactions_df = pd.read_pickle('models/recommender/interactions_df.pkl')
             
