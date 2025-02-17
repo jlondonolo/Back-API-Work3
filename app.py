@@ -47,7 +47,7 @@ class ModelLoader:
             # Load recommender system and its data
             logger.info("Loading recommender system...")
             # Al cargar el pickle, usa el CustomUnpickler
-            with open('models/recommender.pkl', 'rb') as f:
+            with open('models/recommender/recommender.pkl', 'rb') as f:
                     recommender_model = CustomUnpickler(f).load()
             self.products_df = pd.read_pickle('models/recommender/products_df.pkl')
             self.interactions_df = pd.read_pickle('models/recommender/interactions_df.pkl')
