@@ -10,6 +10,7 @@ import joblib
 from tensorflow.keras.preprocessing import image
 import os
 import logging
+from recommender import ImprovedRecommender
 
 # Configurar logging
 logging.basicConfig(level=logging.INFO)
