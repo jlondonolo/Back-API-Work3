@@ -11,6 +11,8 @@ from pathlib import Path
 from collections import Counter, defaultdict
 import json
 
+
+
 class ImprovedRecommender:
     def __init__(self, chunk_size: int = 1000):
         self.chunk_size = chunk_size
@@ -59,40 +61,50 @@ class ImprovedRecommender:
 
         # Process and save interaction data
         self._process_interactions(interactions_df)
+        # Pre-compute popular recommendations
+        self._precompute_popular_recommendations()
 
         # Generate and save metadata
         self._save_metadata(products_df, interactions_df)
 
         self.logger.info("Data processing completed")
 
+
     def _process_products(self, products_df: pd.DataFrame):
         """Process and save product data"""
         self.logger.info("Processing products...")
 
-        # Seleccionar columnas de información
-        columns_to_save = ['product_id', 'name', 'main_category', 'sub_category',
-                             'discount_price', 'ratings', 'no_of_ratings']
+        # Select info columns
+        columns_to_save = ['product_id', 'name', 'main_category', 'sub_category', 
+                           'discount_price', 'ratings', 'no_of_ratings']
         if 'image_url' in products_df.columns:
             columns_to_save.append('image_url')
-        if 'description' in products_df.columns:
+        if 'description' in products_df.columns:    
             columns_to_save.append('description')
-
+            
         products_df[columns_to_save].to_parquet(
             self.data_dir / 'products_info.parquet'
         )
 
-        # Procesar características en chunks
-        with h5py.File(self.data_dir / 'product_features.h5', 'w') as f:
-            f.create_dataset('features', shape=(self.n_products, self.total_dim), dtype='float32')
+        # Use memory-mapped file for product features
+        features = np.memmap(
+            self.data_dir / 'product_features.npy', 
+            dtype='float32', mode='w+', shape=(self.n_products, self.total_dim)
+        )
 
-            for i in range(0, len(products_df), self.chunk_size):
-                chunk = products_df.iloc[i:i + self.chunk_size]
-                features = self._create_product_features(chunk)
-                f['features'][i:i + len(chunk)] = features
+        for i in range(0, self.n_products, self.chunk_size):
+            chunk = products_df.iloc[i:i + self.chunk_size]
+            chunk_features = self._create_product_features(chunk)
+            features[i:i + len(chunk)] = chunk_features
+            
+            del chunk, chunk_features
+            gc.collect()
 
-                if (i + self.chunk_size) % 10000 == 0:
-                    self.logger.info(f"Processed {i + self.chunk_size} of {len(products_df)} products")
-                    gc.collect()
+            if (i + self.chunk_size) % 10000 == 0:
+                self.logger.info(f"Processed {i + self.chunk_size} products")
+
+        del features
+        gc.collect()
 
     def _create_product_features(self, chunk: pd.DataFrame) -> np.ndarray:
         """Create feature vectors for a chunk of products"""
@@ -119,12 +131,11 @@ class ImprovedRecommender:
         """Process and save user interactions"""
         self.logger.info("Processing user interactions...")
 
-        # Crear mapeo de usuarios
+        # Create user id mapping
         user_ids = sorted(interactions_df['user_id'].unique())
         self.user_id_map = {uid: idx for idx, uid in enumerate(user_ids)}
         np.save(self.data_dir / 'user_ids.npy', user_ids)
 
-        # Procesar en chunks
         for i in range(0, len(user_ids), self.chunk_size):
             chunk_users = user_ids[i:i + self.chunk_size]
             chunk_data = interactions_df[interactions_df['user_id'].isin(chunk_users)]
@@ -132,32 +143,56 @@ class ImprovedRecommender:
             if len(chunk_data) > 0:
                 matrix = self._create_interaction_matrix(chunk_data, chunk_users, i)
                 save_npz(self.data_dir / f'interactions_{i}.npz', matrix)
+                
+                del matrix
+                gc.collect()
+
+            del chunk_data, chunk_users
+            gc.collect()
 
             if (i + self.chunk_size) % 10000 == 0:
                 self.logger.info(f"Processed {i + self.chunk_size} users")
-                gc.collect()
 
         self.logger.info(f"Processed interactions for {len(user_ids)} users")
 
-    def _create_interaction_matrix(self, chunk_data: pd.DataFrame,
-                                 chunk_users: List[int], start_idx: int) -> csr_matrix:
-        """Create interaction matrix for a chunk of users"""
-        rows = []
-        cols = []
-        data = []
 
+    def _create_interaction_matrix(self, chunk_data: pd.DataFrame, 
+                                  chunk_users: List[int], start_idx: int) -> csr_matrix:
+        """Create sparse interaction matrix for a chunk of users"""
+        data = []
+        rows = []  
+        cols = []
+        
         for uid in chunk_users:
-            user_interactions = chunk_data[chunk_data['user_id'] == uid]
-            for _, row in user_interactions.iterrows():
+            user_data = chunk_data[chunk_data['user_id'] == uid]
+            for _, row in user_data.iterrows():
                 rows.append(self.user_id_map[uid] - start_idx)
                 cols.append(row['product_id'])
                 data.append(row['rating'])
 
-        return csr_matrix(
-            (data, (rows, cols)),
-            shape=(len(chunk_users), self.n_products)
+        return csr_matrix((data, (rows, cols)), 
+                          shape=(len(chunk_users), self.n_products))
+    def _precompute_popular_recommendations(self, n_recommendations=1000):
+        """Precompute popular recommendations"""
+        self.logger.info("Pre-computing popular recommendations...")
+        products_info = pd.read_parquet(self.data_dir / 'products_info.parquet')
+        
+        products_info = products_info.dropna(subset=['discount_price', 'ratings', 'no_of_ratings'])
+        products_info['weighted_rating'] = products_info['ratings'] * np.log1p(products_info['no_of_ratings'])
+
+        popular_recs = (
+            products_info
+            .nlargest(n_recommendations, 'weighted_rating')
+            [['product_id', 'name', 'main_category', 'discount_price', 'ratings', 'weighted_rating']]
+            .rename(columns={
+                'product_id': 'id', 
+                'discount_price': 'price', 
+                'weighted_rating': 'score'
+            })
+            .to_dict(orient='records')
         )
 
+        self.popular_recommendations = popular_recs
     def _save_metadata(self, products_df: pd.DataFrame, interactions_df: pd.DataFrame):
         """Save metadata for recommendations"""
         self.logger.info("Saving metadata...")
@@ -480,69 +515,9 @@ class ImprovedRecommender:
             return self._get_popular_recommendations(n_recommendations)
 
     def _get_popular_recommendations(self, n_recommendations: int = 5) -> List[Dict]:
-        """
-        Get diverse popular recommendations when personalized ones are not available.
-        """
-        try:
-            products_info = pd.read_parquet(self.data_dir / 'products_info.parquet')
-            
-            # Filter out products without critical data
-            products_info = products_info.dropna(subset=['discount_price', 'ratings', 'no_of_ratings'])
-
-            # Calculate weighted rating
-            products_info['weighted_rating'] = (
-                products_info['ratings'] *
-                np.log1p(products_info['no_of_ratings'])
-            )
-
-            recommendations = []
-            used_categories = set()
-            used_brands = set()
-
-            candidate_pool = products_info.copy()
-
-            while len(recommendations) < n_recommendations and not candidate_pool.empty:
-                # Apply diversity penalties
-                candidate_pool['adjusted_score'] = candidate_pool.apply(
-                    lambda row: row['weighted_rating'] * (
-                        0.5 if row['main_category'] in used_categories else 1.0
-                    ) * (
-                        0.5 if row['name'].split()[0].lower() in used_brands else 1.0
-                    ),
-                    axis=1
-                )
-
-                best_idx = candidate_pool['adjusted_score'].idxmax()
-                selected = candidate_pool.loc[best_idx]
-
-                recommendations.append({
-                    'product_id': int(selected.name),
-                    'name': selected['name'],
-                    'category': selected['main_category'],
-                    'price': float(selected['discount_price']),
-                    'rating': float(selected['ratings']),
-                    'score': float(selected['weighted_rating']),
-                    'image_url': selected.get('image_url', 'Image not available'),
-                    'description': selected.get('description', 'No description available')
-                })
-
-                used_categories.add(selected['main_category'])
-                used_brands.add(selected['name'].split()[0].lower())
-
-                # Remove products from same category or brand
-                same_brand_category = (
-                    (candidate_pool['main_category'] == selected['main_category']) |
-                    (candidate_pool['name'].str.split().str[0].str.lower() == 
-                     selected['name'].split()[0].lower())
-                )
-                candidate_pool = candidate_pool[~same_brand_category]
-
-            return recommendations
-
-        except Exception as e:
-            self.logger.error(f"Error getting popular recommendations: {str(e)}")
-            return []
-
+        """Get pre-computed popular recommendations"""
+        return self.popular_recommendations[:n_recommendations]
+        
     def cleanup(self):
         """Clean up temporary files"""
         if self.data_dir.exists():
