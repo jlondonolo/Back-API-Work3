@@ -54,12 +54,12 @@ class ModelLoader:
             
             # Load image classifier
             logger.info("Loading image classifier...")
-            self.classifier = tf.keras.models.load_model('models/classifier/ecommerce_classifier.h5')
+            self.classifier = tf.keras.models.load_model('models/classifier/ecommerce_classifier.h5', compile=False)
             self.class_names = ['jeans', 'sofa', 'tshirt', 'tv']
             
             # Load sales prediction model and data
             logger.info("Loading sales prediction model...")
-            self.sales_model = tf.keras.models.load_model('models/sales/sales_prediction_model.h5')
+            self.sales_model = tf.keras.models.load_model('models/sales/sales_prediction_model.h5', compile=False)
             self.scaler = joblib.load('models/sales/scaler.pkl')
             
             # Load sales data
